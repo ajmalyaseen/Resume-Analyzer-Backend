@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.distutils.cfg
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Environment variables
+.env
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
