@@ -25,7 +25,7 @@ A powerful AI-driven application that analyzes resumes against job descriptions,
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-username/ai-resume-analyzer.git
+   git clone https://github.com/ajmalyaseen/ai-resume-analyzer.git
    cd ai-resume-analyzer
    ```
 
