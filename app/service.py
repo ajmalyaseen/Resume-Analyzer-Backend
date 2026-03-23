@@ -105,6 +105,7 @@ async def extract_skills(resume_text):
     Analyze the provided resume text and extract:
     1. The most important professional skills (top 5-10).
     2. The candidate's TOTAL professional experience level.
+    3. The most appropriate "Target Job Title" for this candidate based on their specialization, projects, and skills (e.g., "AI Developer", "Backend Developer", "Data Scientist").
 
     ### Experience Level Guidelines:
     - **Internship/Fresher:** If the candidate only has internships, student projects, or < 1 year of total full-time experience.
@@ -118,7 +119,8 @@ async def extract_skills(resume_text):
     1. Return the output strictly in the following JSON format:
     {
     "skills": ["Skill1", "Skill2", "Skill3"],
-    "experience_level": "Fresher" | "Junior" | "Senior" | "Lead"
+    "experience_level": "Fresher" | "Junior" | "Senior" | "Lead",
+    "target_role": "Ideal Job Title"
     }
     2. No introduction, no explanation, only the raw JSON object.
     """
@@ -151,20 +153,20 @@ async def extract_skills(resume_text):
 
 def search_jobs(extracted_skills_data):
     """
-    Searches for relevant jobs based on extracted skills and experience level using Tavily.
+    Searches for relevant jobs based on extracted skills, experience level, and target role using Tavily.
     """
     try:
-        # Extract skills and experience level from the input data
+        # Extract skills, experience, and target role from the input data
         skills_list = extracted_skills_data.get("skills", [])
         experience_level = extracted_skills_data.get("experience_level", "Entry Level")
+        target_role = extracted_skills_data.get("target_role", "Developer")
         
         if not skills_list:
             return {"error": "No skills were found to search for jobs."}
 
-        # Refine the search query based on experience level
-        # If it's a fresher, explicitly search for entry-level or fresher roles
+        # Refine the search query: Experience + Target Role + Top 2 Skills
         exp_prefix = "Fresher" if "fresher" in experience_level.lower() else experience_level
-        search_query = f"{exp_prefix} {' and '.join(skills_list[:3])} jobs in India"
+        search_query = f"{exp_prefix} {target_role} jobs in India using {' and '.join(skills_list[:2])}"
         
         logger.info(f"Searching for jobs with query: {search_query}")
         
@@ -175,6 +177,7 @@ def search_jobs(extracted_skills_data):
             return {
                 "detected_skills": skills_list,
                 "detected_experience": experience_level,
+                "detected_target_role": target_role,
                 "jobs": search_results['results']
             }
         else:
