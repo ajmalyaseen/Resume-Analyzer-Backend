@@ -2,10 +2,14 @@ import os
 import io
 import re
 import json
+import logging
 import PyPDF2
+from fastapi import HTTPException
 from groq import AsyncGroq
 from tavily import TavilyClient
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables from the .env file located in the same directory
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -14,13 +18,31 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
+# File upload constraints
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+ALLOWED_CONTENT_TYPES = ["application/pdf"]
+
 async def extract_resume_text(pdf_file):
     """
     Extracts text content from an uploaded PDF file.
+    Validates file type and size before processing.
     """
+    # Validate content type
+    if pdf_file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
     # Read the file contents into memory
     contents = await pdf_file.read()
-    pdf_reader = PyPDF2.PdfReader(io.BytesIO(contents))
+
+    # Validate file size
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 5 MB.")
+
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(contents))
+    except Exception as e:
+        logger.error(f"Failed to parse PDF file: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Invalid or corrupted PDF file.")
 
     text = ""
     # Iterate through each page and append its text content
@@ -35,28 +57,25 @@ async def analyzing_resume(resume_text, job_description):
     Analyzes the resume against a job description using Groq's LLM.
     Returns a JSON object with match percentage, matches, missing skills, and suggestions.
     """
-    prompt = f"""
+    system_prompt = """
     You are an expert HR and ATS (Applicant Tracking System) analyzer.
-    Compare the following Resume with the Job Description.
-    
-    Resume: {resume_text}
-    Job Description: {job_description}
-    
-    Please provide the output in JSON format with these keys:
+    Compare the provided Resume with the Job Description.
+    Respond ONLY with a valid JSON object using these keys:
     1. match_percentage: (in percentage)
     2. matches: (list of matching skills)
     3. missing: (list of missing skills)
     4. suggestions: (how to reach 100% match)
+    Do not include any text outside the JSON object.
     """
+
+    user_content = f"Resume:\n{resume_text}\n\nJob Description:\n{job_description}"
 
     try:
         # Request a completion from the Groq model
         chat_completion = await groq_client.chat.completions.create(
             messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
             model="llama-3.3-70b-versatile",
         )
@@ -74,38 +93,42 @@ async def analyzing_resume(resume_text, job_description):
             return {"error": "Could not identify analysis details in the response."}
 
     except Exception as e:
-        # General error handling for the generation process
-        return {"error": "Failed to process resume analysis. Please try again later."}
+        logger.error(f"Resume analysis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process resume analysis. Please try again later.")
 
 async def extract_skills(resume_text):
     """
     Extracts core professional skills from the resume text using Groq's LLM.
     """
-    prompt = f"""
+    system_prompt = """
     You are a professional Career Consultant and Recruitment Specialist.
-    Analyze the provided resume text and extract the most important professional skills, 
-    certifications, and domain expertise.
+    Analyze the provided resume text and extract:
+    1. The most important professional skills (top 5-10).
+    2. The candidate's TOTAL professional experience level.
 
-    Resume Text: {resume_text}
+    ### Experience Level Guidelines:
+    - **Internship/Fresher:** If the candidate only has internships, student projects, or < 1 year of total full-time experience.
+    - **Junior:** 1–3 years of total full-time professional experience.
+    - **Senior:** 5+ years of total full-time professional experience.
+    - **Expert/Lead:** 10+ years or leadership roles.
+
+    **CRITICAL:** Do NOT over-estimate experience based on the number of skills. A candidate with many skills but only 1 month of internship is a "Fresher/Intern".
 
     ### Instructions:
-    1. Identify the top 5-10 core professional skills relevant to the user's career field.
-    2. Group them into a single list of strings.
-    3. Return the output strictly in the following JSON format:
-    {{
-    "skills": ["Skill1", "Skill2", "Skill3"]
-    }}
-    4. No introduction, no explanation, only the raw JSON object.
-    """           
+    1. Return the output strictly in the following JSON format:
+    {
+    "skills": ["Skill1", "Skill2", "Skill3"],
+    "experience_level": "Fresher" | "Junior" | "Senior" | "Lead"
+    }
+    2. No introduction, no explanation, only the raw JSON object.
+    """
 
     try:
         # Request skill extraction from the Groq model
         chat_completion = await groq_client.chat.completions.create(
             messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Resume Text:\n{resume_text}"},
             ],
             model="llama-3.3-70b-versatile",
         )
@@ -123,22 +146,27 @@ async def extract_skills(resume_text):
             return {"error": "Could not extract skills from the resume."}
 
     except Exception as e:
-        # Error handling for skill extraction
-        return {"error": "Failed to process skill extraction. Please try again later."}
+        logger.error(f"Skill extraction failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process skill extraction. Please try again later.")
 
 def search_jobs(extracted_skills_data):
     """
-    Searches for relevant jobs based on extracted skills using the Tavily search engine.
+    Searches for relevant jobs based on extracted skills and experience level using Tavily.
     """
     try:
-        # Handle both dictionary input and raw list
-        skills_list = extracted_skills_data.get("skills", []) if isinstance(extracted_skills_data, dict) else extracted_skills_data
+        # Extract skills and experience level from the input data
+        skills_list = extracted_skills_data.get("skills", [])
+        experience_level = extracted_skills_data.get("experience_level", "Entry Level")
         
         if not skills_list:
             return {"error": "No skills were found to search for jobs."}
 
-        # Create a search query using the top 3 skills
-        search_query = f"Jobs for {' and '.join(skills_list[:3])} in India"
+        # Refine the search query based on experience level
+        # If it's a fresher, explicitly search for entry-level or fresher roles
+        exp_prefix = "Fresher" if "fresher" in experience_level.lower() else experience_level
+        search_query = f"{exp_prefix} {' and '.join(skills_list[:3])} jobs in India"
+        
+        logger.info(f"Searching for jobs with query: {search_query}")
         
         # Perform the search using Tavily
         search_results = tavily_client.search(query=search_query, max_results=5)
@@ -146,13 +174,14 @@ def search_jobs(extracted_skills_data):
         if search_results.get('results'):
             return {
                 "detected_skills": skills_list,
+                "detected_experience": experience_level,
                 "jobs": search_results['results']
             }
         else:
             return {"error": "No matching jobs found for the detected skills."}
             
     except Exception as e:
-        # Error handling for the search process
-        return {"error": "Failed to search for jobs. Please try again later."}
+        logger.error(f"Job search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to search for jobs. Please try again later.")
 
     
